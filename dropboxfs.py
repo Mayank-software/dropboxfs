@@ -15,6 +15,9 @@ import os
 
 import dropbox
 
+uid = os.getuid()
+gid = os.getgid()
+
 class DropboxFS(LoggingMixIn, Operations):
     """Example memory filesystem. Supports only one level of files."""
     
@@ -74,10 +77,12 @@ class DropboxFS(LoggingMixIn, Operations):
             mtime = int(time.time())
         if metadata['is_dir']:
             return dict(st_mode=(S_IFDIR | 0755), st_nlink=1,
-                st_size=metadata['bytes'], st_ctime=mtime, st_mtime=mtime, st_atime=mtime)
+                st_size=metadata['bytes'], st_ctime=mtime, st_mtime=mtime, st_atime=mtime,
+                st_uid=uid, st_gid=gid)
         else:
             return dict(st_mode=(S_IFREG | 0755), st_nlink=1,
-                st_size=metadata['bytes'], st_ctime=mtime, st_mtime=mtime, st_atime=mtime)
+                st_size=metadata['bytes'], st_ctime=mtime, st_mtime=mtime, st_atime=mtime,
+                st_uid=uid, st_gid=gid)
     
     def getxattr(self, path, name, position=0):
         return ''
