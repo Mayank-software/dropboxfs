@@ -13,10 +13,9 @@ import time
 import dateutil.parser
 import os
 
-from threading import Thread, Lock
-
+import threading 
 import dropbox
-import signal
+
 
 uid = os.getuid()
 gid = os.getgid()
@@ -31,17 +30,15 @@ class DropboxFS(LoggingMixIn, Operations):
 
 		self.stats_cache = defaultdict(str)
 
-		self.lock = Lock()
+		self.mutex = threading.Lock()
 		# The interval for cleaning up the cache
 		cleanup_interval = 10
 		threshold = 4
 		self.stop = False
-		self.cleanup_thread = Thread(target = self.clean_cache, args =  (cleanup_interval, threshold, ) )
+		self.cleanup_thread = threading.Thread(target = self.clean_cache, args =  (cleanup_interval, threshold, ) )
 		#daemon set to true will make this thread terminate when other threads terminate, no need of sig handlers etc...
 		self.cleanup_thread.daemon = True
 		self.cleanup_thread.start()
-	
-
 
 	def clean_cache(self, delay=10, threshold=4):
 		"""This is an internal loop to clean cached values where time is bigger than threshold"""		
@@ -50,14 +47,14 @@ class DropboxFS(LoggingMixIn, Operations):
 						
 			print 'running cleanup loop'		
 			to_remove = []
-			with self.lock:
+			with self.mutex:
 				for entry in self.stats_cache:
 					try:
 						time_passed = time.time() - self.stats_cache[entry]['time']		
-						if (time_passed > threshold ): 
-							print 'adding entry for removal ', entry, ' time passed', time_passed
+						if (time_passed > threshold ): 							
 							to_remove.append(entry)
-					# this is throwing some exception 
+					#Some items in the dictionary are empty, dont'y know why
+					#nevertheless an exception would kill the clean-up thread we have to decide what to do
 					except Exception as ex:					
 						print '-> error in item ', entry, ':',  self.stats_cache[entry]
 						print ex
@@ -81,7 +78,8 @@ class DropboxFS(LoggingMixIn, Operations):
 
 
 	def set_cached_stats(self, path, stats):
-		with self.lock:	
+		"""Adds an item to the cache"""
+		with self.mutex:	
 			self.stats_cache[path] = {'stats':stats, 'time':time.time()}
 
 	def list_folder(self, path):
@@ -96,6 +94,7 @@ class DropboxFS(LoggingMixIn, Operations):
 		return folders
 
 	def refresh_cache(self, path):
+		"""Gets gets the metada of an item and writes it to the cache"""
 		metadata = self.get_metadata(path)
 
 		if not metadata:
@@ -103,23 +102,17 @@ class DropboxFS(LoggingMixIn, Operations):
 
 		stats = self.stats_from_metadata(metadata)
 		self.set_cached_stats(path, stats)
+		return stats
 
 	def getattr(self, path, fh=None):
-		with self.lock:		
+		with self.mutex:		
 			if self.stats_cache[path]:
 				time_passed = time.time() - self.stats_cache[path]['time']		
 				if (time_passed < 3 ):					
 					return self.stats_cache[path]['stats']
 			
-		print 'getting new stat for ', path
-		metadata = self.get_metadata(path)
-
-		if not metadata:
-			raise FuseOSError(ENOENT)
-
-		stats = self.stats_from_metadata(metadata)		
-		self.set_cached_stats(path, stats)
-		return stats
+		print 'getting new stat for ', path		
+		return self.refresh_cache(path)
 
 	def stats_from_metadata(self, metadata):
 		if 'modified' in metadata:

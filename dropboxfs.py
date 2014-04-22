@@ -103,34 +103,39 @@ class DropboxFS(LoggingMixIn, Operations):
         raise FuseOSError(EROFS)
 
     def open(self, path, flags):
-        try:
-            f, metadata = self.dropbox.get_file_and_metadata(path)
-        except dropbox.rest.ErrorResponse as ex:
-            if ex.status == 404:
-                rev = None
-            else:
-                raise
-        else:
-            rev = metadata['rev']
+		try:
+			f, metadata = self.dropbox.get_file_and_metadata(path)
+		except dropbox.rest.ErrorResponse as ex:
+			if ex.status == 404:
+				rev = None
+			else:
+				raise
+		else:
+			rev = metadata['rev']
 
-        if flags & os.O_CREAT or flags & os.O_TRUNC:
-            nf = cStringIO.StringIO()
-            self.dropbox.put_file(path, nf, overwrite=True, parent_rev=rev)
-        elif rev:
-            nf = cStringIO.StringIO(f.read())
-        else:
-            raise FuseOSError(ENOENT)
+		if flags & os.O_CREAT or flags & os.O_TRUNC:
+			nf = cStringIO.StringIO()
+			self.dropbox.put_file(path, nf, overwrite=True, parent_rev=rev)
+		elif rev:
+			#CTM: This creates a readonly object
+			#nf = cStringIO.StringIO(f.read())
+			nf = cStringIO.StringIO()
+			nf.write(f.read())
+		else:
+			raise FuseOSError(ENOENT)
 
-        self.data[path] = {'f': nf, 'rev': rev}
-        self.fd += 1
-        return self.fd
+		self.fd += 1
+		#self.data[path] = {'f': nf, 'rev': rev}
+		#now the key is the file handle, store the path just in case
+		self.data[self.fd] = {'f': nf, 'rev': rev}
+		return self.fd
     
     def opendir(self, path):
         self.fd += 1
         return self.fd
 
     def read(self, path, size, offset, fh):
-        f = self.data[path]['f']
+        f = self.data[fh]['f']
         f.seek(offset)
         return f.read(size)
     
@@ -142,10 +147,15 @@ class DropboxFS(LoggingMixIn, Operations):
             return f.read()
 
     def release(self, path, fh):
-        f = self.data[path]['f']
-        rev = self.data[path]['rev']
-        f.seek(0)
-        self.dropbox.put_file(path, f, overwrite=True, parent_rev=rev)
+		f = self.data[fh]['f']
+		rev = self.data[fh]['rev']
+		f.seek(0)
+		self.dropbox.put_file(path, f, overwrite=True, parent_rev=rev)
+		#We should remove the data from the dictionary at some point, so here seems nice
+		# also we should get a way of re-using freed file handles
+		self.data.pop(fh)
+		
+		
     
     def releasedir(self, path, fh):
         pass
@@ -185,7 +195,7 @@ class DropboxFS(LoggingMixIn, Operations):
         pass
     
     def write(self, path, data, offset, fh):
-        f = self.data[path]['f']
+        f = self.data[fh]['f']
         f.seek(offset)
         f.write(data)
         return len(data)
