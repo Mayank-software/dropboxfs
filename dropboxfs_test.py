@@ -29,7 +29,7 @@ class DropboxFS(LoggingMixIn, Operations):
 		self.fd = 0
 
 		self.stats_cache = defaultdict(str)
-
+		#the name lock was confliting with something from 
 		self.mutex = threading.Lock()
 		# The interval for cleaning up the cache
 		cleanup_interval = 10
@@ -43,27 +43,23 @@ class DropboxFS(LoggingMixIn, Operations):
 	def clean_cache(self, delay=10, threshold=4):
 		"""This is an internal loop to clean cached values where time is bigger than threshold"""		
 		while(not self.stop):
-			time.sleep(delay)
-						
+			time.sleep(delay)						
 			print 'running cleanup loop'		
-			to_remove = []
-			with self.mutex:
-				for entry in self.stats_cache:
-					try:
-						time_passed = time.time() - self.stats_cache[entry]['time']		
-						if (time_passed > threshold ): 							
-							to_remove.append(entry)
+			keys = self.stats_cache.keys()			
+			for k in keys:
+				with self.mutex:
 					#Some items in the dictionary are empty, dont'y know why
-					#nevertheless an exception would kill the clean-up thread we have to decide what to do
+					#nevertheless an exception would kill the clean-up thread we have to decide what to do					
+					try:
+						time_passed = time.time() - self.stats_cache[k]['time']							
+						if (time_passed > threshold ):
+							print 'removing item ', k, 'time passed ', time_passed
+							self.stats_cache.pop(k)
 					except Exception as ex:					
-						print '-> error in item ', entry, ':',  self.stats_cache[entry]
+						print '-> error in item ', k, ':',  self.stats_cache[k]
 						print ex
 						# removes this item for the next loop
-						to_remove.append(entry)
-			
-				for entry in to_remove:
-					print 'removing cache for', entry
-					self.stats_cache.pop(entry)
+						self.stats_cache.pop(k)
 
 	def get_metadata(self, path):
 		try:
