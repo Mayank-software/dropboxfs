@@ -111,6 +111,7 @@ class DropboxFS(LoggingMixIn, Operations):
 		return self.refresh_cache(path)
 
 	def stats_from_metadata(self, metadata):
+		"""Converts dropbox metadata to stats"""
 		if 'modified' in metadata:
 			mtime = int(time.mktime(dateutil.parser.parse(metadata['modified']).timetuple()))
 		else:
@@ -253,7 +254,7 @@ class DropboxFS(LoggingMixIn, Operations):
 		    pad = ''
 		nf = cStringIO.StringIO(data + pad)
 		self.dropbox.put_file(path, nf, overwrite=True, parent_rev=metadata['rev'])
-		self.refresh_cache(path)
+		#self.refresh_cache(path)
 
 	def unlink(self, path):
 		pass
@@ -266,7 +267,7 @@ class DropboxFS(LoggingMixIn, Operations):
 		f.seek(offset)
 		print data
 		f.write(data)
-		self.refresh_cache(path)
+		#self.refresh_cache(path)
 		return len(data)
 
 
