@@ -6,7 +6,7 @@ from stat import S_IFDIR, S_IFLNK, S_IFREG
 from sys import argv, exit
 from time import time
 
-from fuse import FUSE, FuseOSError, Operations, LoggingMixIn
+from dropboxfs.fuse import FUSE, FuseOSError, Operations, LoggingMixIn
 
 import cStringIO
 import time
