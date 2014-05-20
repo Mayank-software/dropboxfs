@@ -688,5 +688,5 @@ class LoggingMixIn:
         except OSError, e:
             ret = str(e)
             raise
-        finally:
+        finally:			
             print '<-', op, repr(ret)

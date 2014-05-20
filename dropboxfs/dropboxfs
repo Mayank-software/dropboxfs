@@ -4,16 +4,16 @@ from collections import defaultdict
 from errno import ENOENT
 from stat import S_IFDIR, S_IFLNK, S_IFREG
 from sys import argv, exit
-from time import time
+import time
 
 from dropboxfs.fuse import FUSE, FuseOSError, Operations, LoggingMixIn
 
 import cStringIO
-import time
 import dateutil.parser
 import os
 
-import threading 
+from argparse import ArgumentParser
+import threading
 import dropbox
 
 
@@ -21,7 +21,7 @@ uid = os.getuid()
 gid = os.getgid()
 
 class DropboxFS(LoggingMixIn, Operations):
-	"""Example memory filesystem. Supports only one level of files."""
+	"""Example memory file-system. Supports only one level of files."""
 
 	def __init__(self, token):
 		self.dropbox = dropbox.client.DropboxClient(token)
@@ -29,62 +29,64 @@ class DropboxFS(LoggingMixIn, Operations):
 		self.fd = 0
 
 		self.stats_cache = defaultdict(str)
-		#the name lock was confliting with something from 
+		#the name lock was conflicting with something from
 		self.mutex = threading.Lock()
 		# The interval for cleaning up the cache
 		cleanup_interval = 10
 		threshold = 4
 		self.stop = False
-		self.cleanup_thread = threading.Thread(target = self.clean_cache, args =  (cleanup_interval, threshold, ) )
-		#daemon set to true will make this thread terminate when other threads terminate, no need of sig handlers etc...
+		self.cleanup_thread = threading.Thread(target=self.clean_cache,
+					args=(cleanup_interval, threshold, ))		
+		#daemon set to true will make this thread terminate when other threads terminate,
+		#so no need of sig handlers etc...
 		self.cleanup_thread.daemon = True
 		self.cleanup_thread.start()
 
 	def clean_cache(self, delay=10, threshold=4):
-		"""This is an internal loop to clean cached values where time is bigger than threshold"""		
-		while(not self.stop):
-			time.sleep(delay)						
-			print 'running cleanup loop'		
-			keys = self.stats_cache.keys()			
-			for k in keys:
-				with self.mutex:
-					#Some items in the dictionary are empty, dont'y know why
-					#nevertheless an exception would kill the clean-up thread we have to decide what to do					
+		"""This is an internal loop that cleans cached values.
+		Thea cleaning is made when time is bigger than threshold"""
+		while not self.stop:
+			time.sleep(delay)
+			print 'running cleanup loop'
+			with self.mutex:
+				keys = self.stats_cache.keys()			
+				for k in keys:
+					#Some items in the dictionary are empty, don't'y know why
+					#nevertheless an exception would kill the clean-up thread we have to decide what to do
 					try:
-						time_passed = time.time() - self.stats_cache[k]['time']							
-						if (time_passed > threshold ):
+						time_passed = time.time() - self.stats_cache[k]['time']
+						if time_passed > threshold:
 							print 'removing item ', k, 'time passed ', time_passed
-							self.stats_cache.pop(k)
-					except Exception as ex:					
+							del self.stats_cache[k]
+					except Exception as ex:
 						print '-> error in item ', k, ':',  self.stats_cache[k]
 						print ex
 						# removes this item for the next loop
-						self.stats_cache.pop(k)
+						del self.stats_cache[k]
 
 	def get_metadata(self, path):
 		try:
-		    metadata = self.dropbox.metadata(path, list=False)
+			metadata = self.dropbox.metadata(path, list=False)
 		except dropbox.rest.ErrorResponse as ex:
-		    if ex.status == 404:
-		        return None
-		    else:
-		        raise 
+			if ex.status == 404:
+				return None
+			else:
+				raise
 		else:
-		    return metadata
-
+			return metadata
 
 	def set_cached_stats(self, path, stats):
 		"""Adds an item to the cache"""
-		with self.mutex:	
-			self.stats_cache[path] = {'stats':stats, 'time':time.time()}
+		with self.mutex:
+			self.stats_cache[path] = {'stats': stats, 'time': time.time()}
 
 	def list_folder(self, path):
 		# TODO: Change for 'delta' call to avoid 25,000 files limit
 		metadata = self.dropbox.metadata(path, list=True)
 		folders = []
-		for entry in metadata['contents']:	
+		for entry in metadata['contents']:
 			stats = self.stats_from_metadata(entry)
-			filename  = str(entry['path'])						
+			filename = str(entry['path'])
 			self.set_cached_stats(filename, stats)
 			folders.append(os.path.split(filename)[1])
 		return folders
@@ -92,7 +94,6 @@ class DropboxFS(LoggingMixIn, Operations):
 	def refresh_cache(self, path):
 		"""Gets gets the metada of an item and writes it to the cache"""
 		metadata = self.get_metadata(path)
-
 		if not metadata:
 			raise FuseOSError(ENOENT)
 
@@ -101,13 +102,11 @@ class DropboxFS(LoggingMixIn, Operations):
 		return stats
 
 	def getattr(self, path, fh=None):
-		with self.mutex:		
+		with self.mutex:
 			if self.stats_cache[path]:
-				time_passed = time.time() - self.stats_cache[path]['time']		
-				if (time_passed < 3 ):					
+				time_passed = time.time() - self.stats_cache[path]['time']
+				if time_passed < 3:
 					return self.stats_cache[path]['stats']
-			
-		print 'getting new stat for ', path		
 		return self.refresh_cache(path)
 
 	def stats_from_metadata(self, metadata):
@@ -127,7 +126,7 @@ class DropboxFS(LoggingMixIn, Operations):
 				st_uid=uid, st_gid=gid)
 
 		return result
-		
+
 	def chmod(self, path, mode):
 		return 0
 
@@ -149,7 +148,7 @@ class DropboxFS(LoggingMixIn, Operations):
 
 	def fsyncdir(self, path, datasync, fh):
 		return 0
-	
+
 	def getxattr(self, path, name, position=0):
 		return ''
 
@@ -183,17 +182,12 @@ class DropboxFS(LoggingMixIn, Operations):
 			nf = cStringIO.StringIO()
 			self.dropbox.put_file(path, nf, overwrite=True, parent_rev=rev)
 		elif rev:
-			#CTM: This creates a readonly object
-			#nf = cStringIO.StringIO(f.read())
 			nf = cStringIO.StringIO()
 			nf.write(f.read())
-
 		else:
 			raise FuseOSError(ENOENT)
 
 		self.fd += 1
-		#self.data[path] = {'f': nf, 'rev': rev}
-		#now the key is the file handle, store the path just in case
 		self.data[self.fd] = {'f': nf, 'rev': rev}
 		return self.fd
 
@@ -211,18 +205,14 @@ class DropboxFS(LoggingMixIn, Operations):
 
 	def readlink(self, path):
 		with self.dropbox.get_file(path) as f:
-		    return f.read()
+			return f.read()
 
 	def release(self, path, fh):
 		f = self.data[fh]['f']
 		rev = self.data[fh]['rev']
 		f.seek(0)
 		self.dropbox.put_file(path, f, overwrite=True, parent_rev=rev)
-		#We should remove the data from the dictionary at some point, so here seems nice
-		# also we should get a way of re-using freed file handles
-		self.data.pop(fh)
-	
-	
+		del self.data[fh]
 
 	def releasedir(self, path, fh):
 		pass
@@ -249,9 +239,9 @@ class DropboxFS(LoggingMixIn, Operations):
 		f, metadata = self.dropbox.get_file_and_metadata(path)
 		data = f.read(length)
 		if len(data) < length:
-		    pad = '\0' * (length - len(data))
+			pad = '\0' * (length - len(data))
 		else:
-		    pad = ''
+			pad = ''
 		nf = cStringIO.StringIO(data + pad)
 		self.dropbox.put_file(path, nf, overwrite=True, parent_rev=metadata['rev'])
 		#self.refresh_cache(path)
@@ -264,20 +254,14 @@ class DropboxFS(LoggingMixIn, Operations):
 
 	def write(self, path, data, offset, fh):
 		f = self.data[fh]['f']
-		f.seek(offset)
-		print data
+		f.seek(offset)		
 		f.write(data)
-		#self.refresh_cache(path)
 		return len(data)
 
-
-
 if __name__ == "__main__":
-    if len(argv) != 3:
-        print 'usage: %s <token> <mountpoint>' % argv[0]
-        exit(1)
-    token = argv[1]
-    mountpoint = argv[2]
-    fuse = FUSE(DropboxFS(token), mountpoint, foreground=True)
-
-
+	parser = ArgumentParser(description='Dropbox filesystem')
+	parser.add_argument( '--token', '-t', help='Dropbox access token')
+	parser.add_argument('--mountpoint', '-m', help='path of the folder where to perform the mount')
+	args= parser.parse_args()
+	
+	fuse = FUSE( DropboxFS( args.token), args.mountpoint, foreground=True)
