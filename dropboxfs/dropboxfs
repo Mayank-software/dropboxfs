@@ -1,267 +1,275 @@
 #!/usr/bin/env python
-
+# -*- coding: utf-8 -*-
+#
+# The MIT License (MIT)
+#
+#                           Copyright (c) 2014
+#       Data Intensive Applications and Systems laboratory (DIAS)
+#                École Polytechnique Fédérale de Lausanne
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#
+from argparse import ArgumentParser
 from collections import defaultdict
 from errno import ENOENT
 from stat import S_IFDIR, S_IFLNK, S_IFREG
 from sys import argv, exit
-import time
-
-from dropboxfs.fuse import FUSE, FuseOSError, Operations, LoggingMixIn
-
 import cStringIO
 import dateutil.parser
 import os
-
-from argparse import ArgumentParser
+import time
 import threading
+
 import dropbox
+from .fuse import FUSE, FuseOSError, Operations, LoggingMixIn
 
 
 uid = os.getuid()
 gid = os.getgid()
 
+
 class DropboxFS(LoggingMixIn, Operations):
-	"""Example memory file-system. Supports only one level of files."""
+    """Example memory file-system. Supports only one level of files."""
 
-	def __init__(self, token):
-		self.dropbox = dropbox.client.DropboxClient(token)
-		self.data = defaultdict(str)
-		self.fd = 0
+    def __init__(self, token, cleanup_interval=10, cleanup_threshold=4):
+        self.dropbox = dropbox.client.DropboxClient(token)
+        self.data = defaultdict(str)
+        self.fd = 0
 
-		self.stats_cache = defaultdict(str)
-		#the name lock was conflicting with something from
-		self.mutex = threading.Lock()
-		# The interval for cleaning up the cache
-		cleanup_interval = 10
-		threshold = 4
-		self.stop = False
-		self.cleanup_thread = threading.Thread(target=self.clean_cache,
-					args=(cleanup_interval, threshold, ))		
-		#daemon set to true will make this thread terminate when other threads terminate,
-		#so no need of sig handlers etc...
-		self.cleanup_thread.daemon = True
-		self.cleanup_thread.start()
+        self.stats_cache = defaultdict(str)
+        self.mutex = threading.Lock()
+        self.cleanup_thread = threading.Thread(target=self.clean_cache,
+                    args=(cleanup_interval, cleanup_threshold))
+        self.cleanup_thread.daemon = True
+        self.cleanup_thread.start()
 
-	def clean_cache(self, delay=10, threshold=4):
-		"""This is an internal loop that cleans cached values.
-		Thea cleaning is made when time is bigger than threshold"""
-		while not self.stop:
-			time.sleep(delay)
-			print 'running cleanup loop'
-			with self.mutex:
-				keys = self.stats_cache.keys()			
-				for k in keys:
-					#Some items in the dictionary are empty, don't'y know why
-					#nevertheless an exception would kill the clean-up thread we have to decide what to do
-					try:
-						time_passed = time.time() - self.stats_cache[k]['time']
-						if time_passed > threshold:
-							print 'removing item ', k, 'time passed ', time_passed
-							del self.stats_cache[k]
-					except Exception as ex:
-						print '-> error in item ', k, ':',  self.stats_cache[k]
-						print ex
-						# removes this item for the next loop
-						del self.stats_cache[k]
+    def clean_cache(self, interval, threshold):
+        """Regularly cleans cache with metadata stats."""
+        while True:
+            time.sleep(interval)
+            with self.mutex:
+                keys = self.stats_cache.keys()            
+                for k in keys[:]:
+                    elapsed = time.time() - self.stats_cache[k]['time']
+                    if elapsed > threshold:
+                        del self.stats_cache[k]
 
-	def get_metadata(self, path):
-		try:
-			metadata = self.dropbox.metadata(path, list=False)
-		except dropbox.rest.ErrorResponse as ex:
-			if ex.status == 404:
-				return None
-			else:
-				raise
-		else:
-			return metadata
+    def get_metadata(self, path):
+        try:
+            metadata = self.dropbox.metadata(path, list=False)
+        except dropbox.rest.ErrorResponse as ex:
+            if ex.status == 404:
+                return None
+            else:
+                raise
+        else:
+            return metadata
 
-	def set_cached_stats(self, path, stats):
-		"""Adds an item to the cache"""
-		with self.mutex:
-			self.stats_cache[path] = {'stats': stats, 'time': time.time()}
+    def set_cached_stats(self, path, stats):
+        """Adds an item to the cache."""
+        with self.mutex:
+            self.stats_cache[path] = {'stats': stats, 'time': time.time()}
 
-	def list_folder(self, path):
-		# TODO: Change for 'delta' call to avoid 25,000 files limit
-		metadata = self.dropbox.metadata(path, list=True)
-		folders = []
-		for entry in metadata['contents']:
-			stats = self.stats_from_metadata(entry)
-			filename = str(entry['path'])
-			self.set_cached_stats(filename, stats)
-			folders.append(os.path.split(filename)[1])
-		return folders
+    def list_folder(self, path):
+        # TODO: Change for 'delta' call to avoid 25,000 files limit
+        metadata = self.dropbox.metadata(path, list=True)
+        folders = []
+        for entry in metadata['contents']:
+            stats = self.stats_from_metadata(entry)
+            filename = str(entry['path'])
+            self.set_cached_stats(filename, stats)
+            folders.append(os.path.split(filename)[1])
+        return folders
 
-	def refresh_cache(self, path):
-		"""Gets gets the metada of an item and writes it to the cache"""
-		metadata = self.get_metadata(path)
-		if not metadata:
-			raise FuseOSError(ENOENT)
+    def refresh_cache(self, path):
+        """Gets metadata and saves it in the cache."""
+        metadata = self.get_metadata(path)
+        if not metadata:
+            raise FuseOSError(ENOENT)
 
-		stats = self.stats_from_metadata(metadata)
-		self.set_cached_stats(path, stats)
-		return stats
+        stats = self.stats_from_metadata(metadata)
+        self.set_cached_stats(path, stats)
+        return stats
 
-	def getattr(self, path, fh=None):
-		with self.mutex:
-			if self.stats_cache[path]:
-				time_passed = time.time() - self.stats_cache[path]['time']
-				if time_passed < 3:
-					return self.stats_cache[path]['stats']
-		return self.refresh_cache(path)
+    def getattr(self, path, fh=None):
+        with self.mutex:
+            if self.stats_cache[path]:
+                elapsed = time.time() - self.stats_cache[path]['time']
+                # TODO: Make elapsed period configurable
+                if elapsed < 3:
+                    return self.stats_cache[path]['stats']
+        return self.refresh_cache(path)
 
-	def stats_from_metadata(self, metadata):
-		"""Converts dropbox metadata to stats"""
-		if 'modified' in metadata:
-			mtime = int(time.mktime(dateutil.parser.parse(metadata['modified']).timetuple()))
-		else:
-			mtime = int(time.time())
+    def stats_from_metadata(self, metadata):
+        """Convert Dropbox metadata to stats."""
+        if 'modified' in metadata:
+            mtime = int(time.mktime(dateutil.parser.parse(metadata['modified']).timetuple()))
+        else:
+            mtime = int(time.time())
 
-		if metadata['is_dir']:
-			result = dict(st_mode=(S_IFDIR | 0755), st_nlink=1,
-				st_size=metadata['bytes'], st_ctime=mtime, st_mtime=mtime, st_atime=mtime,
-				st_uid=uid, st_gid=gid)
-		else:
-			result = dict(st_mode=(S_IFREG | 0755), st_nlink=1,
-				st_size=metadata['bytes'], st_ctime=mtime, st_mtime=mtime, st_atime=mtime,
-				st_uid=uid, st_gid=gid)
+        if metadata['is_dir']:
+            result = dict(st_mode=(S_IFDIR | 0755), st_nlink=1,
+                st_size=metadata['bytes'], st_ctime=mtime, st_mtime=mtime, st_atime=mtime,
+                st_uid=uid, st_gid=gid)
+        else:
+            result = dict(st_mode=(S_IFREG | 0755), st_nlink=1,
+                st_size=metadata['bytes'], st_ctime=mtime, st_mtime=mtime, st_atime=mtime,
+                st_uid=uid, st_gid=gid)
 
-		return result
+        return result
 
-	def chmod(self, path, mode):
-		return 0
+    def chmod(self, path, mode):
+        return 0
 
-	def chown(self, path, uid, gid):
-		pass
+    def chown(self, path, uid, gid):
+        pass
 
-	def create(self, path, mode):
-		# TODO: 'mode' is ignored
-		return self.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC)
+    def create(self, path, mode):
+        # TODO: 'mode' is ignored
+        return self.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC)
 
-	def destroy(self, path):
-		pass
+    def destroy(self, path):
+        pass
 
-	def flush(self, path, fh):
-		return 0
+    def flush(self, path, fh):
+        return 0
 
-	def fsync(self, path, datasync, fh):
-		return 0
+    def fsync(self, path, datasync, fh):
+        return 0
 
-	def fsyncdir(self, path, datasync, fh):
-		return 0
+    def fsyncdir(self, path, datasync, fh):
+        return 0
 
-	def getxattr(self, path, name, position=0):
-		return ''
+    def getxattr(self, path, name, position=0):
+        return ''
 
-	def init(self, path):
-		pass
+    def init(self, path):
+        pass
 
-	def link(self, target, source):
-		self.dropbox.file_copy(source, target)
+    def link(self, target, source):
+        self.dropbox.file_copy(source, target)
 
-	def listxattr(self, path):
-		return []
+    def listxattr(self, path):
+        return []
 
-	def mkdir(self, path, mode):
-		self.dropbox.file_create_folder(path)
+    def mkdir(self, path, mode):
+        self.dropbox.file_create_folder(path)
 
-	def mknod(self, path, mode, dev):
-		raise FuseOSError(EROFS)
+    def mknod(self, path, mode, dev):
+        raise FuseOSError(EROFS)
 
-	def open(self, path, flags):
-		try:
-			f, metadata = self.dropbox.get_file_and_metadata(path)
-		except dropbox.rest.ErrorResponse as ex:
-			if ex.status == 404:
-				rev = None
-			else:
-				raise
-		else:
-			rev = metadata['rev']
+    def open(self, path, flags):
+        try:
+            f, metadata = self.dropbox.get_file_and_metadata(path)
+        except dropbox.rest.ErrorResponse as ex:
+            if ex.status == 404:
+                rev = None
+            else:
+                raise
+        else:
+            rev = metadata['rev']
 
-		if flags & os.O_CREAT or flags & os.O_TRUNC:
-			nf = cStringIO.StringIO()
-			self.dropbox.put_file(path, nf, overwrite=True, parent_rev=rev)
-		elif rev:
-			nf = cStringIO.StringIO()
-			nf.write(f.read())
-		else:
-			raise FuseOSError(ENOENT)
+        if flags & os.O_CREAT or flags & os.O_TRUNC:
+            nf = cStringIO.StringIO()
+            self.dropbox.put_file(path, nf, overwrite=True, parent_rev=rev)
+        elif rev:
+            nf = cStringIO.StringIO()
+            nf.write(f.read())
+        else:
+            raise FuseOSError(ENOENT)
 
-		self.fd += 1
-		self.data[self.fd] = {'f': nf, 'rev': rev}
-		return self.fd
+        self.fd += 1
+        self.data[self.fd] = {'f': nf, 'rev': rev}
+        return self.fd
 
-	def opendir(self, path):
-		self.fd += 1
-		return self.fd
+    def opendir(self, path):
+        self.fd += 1
+        return self.fd
 
-	def read(self, path, size, offset, fh):
-		f = self.data[fh]['f']
-		f.seek(offset)
-		return f.read(size)
+    def read(self, path, size, offset, fh):
+        f = self.data[fh]['f']
+        f.seek(offset)
+        return f.read(size)
 
-	def readdir(self, path, fh):
-		return ['.', '..'] + self.list_folder(path)
+    def readdir(self, path, fh):
+        return ['.', '..'] + self.list_folder(path)
 
-	def readlink(self, path):
-		with self.dropbox.get_file(path) as f:
-			return f.read()
+    def readlink(self, path):
+        with self.dropbox.get_file(path) as f:
+            return f.read()
 
-	def release(self, path, fh):
-		f = self.data[fh]['f']
-		rev = self.data[fh]['rev']
-		f.seek(0)
-		self.dropbox.put_file(path, f, overwrite=True, parent_rev=rev)
-		del self.data[fh]
+    def release(self, path, fh):
+        f = self.data[fh]['f']
+        rev = self.data[fh]['rev']
+        f.seek(0)
+        self.dropbox.put_file(path, f, overwrite=True, parent_rev=rev)
+        del self.data[fh]
 
-	def releasedir(self, path, fh):
-		pass
+    def releasedir(self, path, fh):
+        pass
 
-	def removexattr(self, path, name):
-		pass
+    def removexattr(self, path, name):
+        pass
 
-	def rename(self, old, new):
-		self.dropbox.file_move(old, new)
+    def rename(self, old, new):
+        self.dropbox.file_move(old, new)
 
-	def rmdir(self, path):
-		self.dropbox.file_delete(path)
+    def rmdir(self, path):
+        self.dropbox.file_delete(path)
 
-	def setxattr(self, path, name, value, options, position=0):
-		pass
+    def setxattr(self, path, name, value, options, position=0):
+        pass
 
-	def statfs(self, path):
-		return dict(f_bsize=512, f_blocks=4096, f_bavail=2048)
+    def statfs(self, path):
+        return dict(f_bsize=512, f_blocks=4096, f_bavail=2048)
 
-	def symlink(self, target, source):
-		self.dropbox.file_copy(source, target)
+    def symlink(self, target, source):
+        self.dropbox.file_copy(source, target)
 
-	def truncate(self, path, length, fh=None):
-		f, metadata = self.dropbox.get_file_and_metadata(path)
-		data = f.read(length)
-		if len(data) < length:
-			pad = '\0' * (length - len(data))
-		else:
-			pad = ''
-		nf = cStringIO.StringIO(data + pad)
-		self.dropbox.put_file(path, nf, overwrite=True, parent_rev=metadata['rev'])
-		#self.refresh_cache(path)
+    def truncate(self, path, length, fh=None):
+        f, metadata = self.dropbox.get_file_and_metadata(path)
+        data = f.read(length)
+        if len(data) < length:
+            pad = '\0' * (length - len(data))
+        else:
+            pad = ''
+        nf = cStringIO.StringIO(data + pad)
+        self.dropbox.put_file(path, nf, overwrite=True, parent_rev=metadata['rev'])
+        # self.refresh_cache(path)
 
-	def unlink(self, path):
-		pass
+    def unlink(self, path):
+        pass
 
-	def utimens(self, path, times=None):
-		pass
+    def utimens(self, path, times=None):
+        pass
 
-	def write(self, path, data, offset, fh):
-		f = self.data[fh]['f']
-		f.seek(offset)		
-		f.write(data)
-		return len(data)
+    def write(self, path, data, offset, fh):
+        f = self.data[fh]['f']
+        f.seek(offset)        
+        f.write(data)
+        return len(data)
+
 
 if __name__ == "__main__":
-	parser = ArgumentParser(description='Dropbox filesystem')
-	parser.add_argument( '--token', '-t', help='Dropbox access token')
-	parser.add_argument('--mountpoint', '-m', help='path of the folder where to perform the mount')
-	args= parser.parse_args()
-	
-	fuse = FUSE( DropboxFS( args.token), args.mountpoint, foreground=True)
+    parser = ArgumentParser(description='Dropbox file system')
+    parser.add_argument('--token', '-t', help='Dropbox access token')
+    parser.add_argument('--mountpoint', '-m', help='Dropbox file system mount point')
+    args = parser.parse_args()
+    
+    fuse = FUSE(DropboxFS(args.token), args.mountpoint, foreground=True)
